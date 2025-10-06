@@ -126,15 +126,57 @@ def calculate_meter_consumption(meter_data, master_timestamps):
         result_df['Timestamp'] = result_df['Timestamp'].dt.strftime('%d/%m/%Y %H:%M')
         return result_df
 
+def extract_and_read_excel_files(zip_file):
+    """Extract and read all Excel files from ZIP archive"""
+    all_data = []
+    required_columns = ['Timestamp', 'Meter', 'Energy Reading']
+    
+    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        # Get list of all Excel files in the ZIP
+        excel_files = [f for f in zip_ref.namelist() if f.endswith(('.xlsx', '.xls'))]
+        
+        if not excel_files:
+            st.error("No Excel files found in the ZIP archive.")
+            return None
+        
+        st.write(f"Found {len(excel_files)} Excel files in the ZIP archive")
+        
+        for excel_file in excel_files:
+            try:
+                # Read Excel file directly from ZIP
+                with zip_ref.open(excel_file) as file:
+                    df = pd.read_excel(file)
+                
+                # Validate required columns
+                missing_columns = [col for col in required_columns if col not in df.columns]
+                if missing_columns:
+                    st.warning(f"File {excel_file} missing columns: {missing_columns}. Skipping.")
+                    continue
+                    
+                all_data.append(df)
+                st.success(f"✅ Successfully read {excel_file}")
+                
+            except Exception as e:
+                st.warning(f"Could not read file {excel_file}: {str(e)}. Skipping.")
+    
+    if not all_data:
+        st.error("No valid Excel data found in the ZIP archive.")
+        return None
+    
+    # Combine all data
+    combined_data = pd.concat(all_data, ignore_index=True)
+    return combined_data
+
 def main():
     st.title("Meter Data Processing App")
     
     # Generate master timeline
     master_timestamps = generate_master_timeline()
     
-    uploaded_files = st.file_uploader("Upload Excel files", type=['xlsx'], accept_multiple_files=True)
+    # File uploader for ZIP file containing Excel files
+    uploaded_zip = st.file_uploader("Upload ZIP file containing Excel files", type=['zip'], accept_multiple_files=False)
     
-    if uploaded_files:
+    if uploaded_zip:
         # Show configuration options
         with st.expander("⚙️ Advanced Settings"):
             col1, col2 = st.columns(2)
@@ -160,29 +202,11 @@ def main():
                 st.info("Processing data...")
                 progress_bar = st.progress(0)
                 
-                # Read and combine all files with validation
-                all_data = []
-                required_columns = ['Timestamp', 'Meter', 'Energy Reading']
+                # Extract and read Excel files from ZIP
+                combined_data = extract_and_read_excel_files(uploaded_zip)
                 
-                for i, file in enumerate(uploaded_files):
-                    try:
-                        df = pd.read_excel(file)
-                        
-                        # Validate required columns
-                        missing_columns = [col for col in required_columns if col not in df.columns]
-                        if missing_columns:
-                            st.warning(f"File {file.name} missing columns: {missing_columns}. Skipping.")
-                            continue
-                            
-                        all_data.append(df)
-                    except Exception as e:
-                        st.warning(f"Could not read file {file.name}: {str(e)}. Skipping.")
-                
-                if not all_data:
-                    st.error("No valid data found in uploaded files.")
+                if combined_data is None:
                     return
-                
-                combined_data = pd.concat(all_data, ignore_index=True)
                 
                 # Store original timestamp format for output
                 original_timestamps = combined_data['Timestamp'].copy()
@@ -206,7 +230,6 @@ def main():
                 # Process each meter
                 zip_buffer = BytesIO()
                 processed_meters = 0
-                correction_log = []
                 
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                     for meter in unique_meters:
@@ -214,14 +237,16 @@ def main():
                         
                         result_df = calculate_meter_consumption(meter_data, master_timestamps)
                         
-                        # Save to Excel in memory
-                        excel_buffer = BytesIO()
-                        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                            result_df.to_excel(writer, index=False, sheet_name='Consumption')
-                        excel_buffer.seek(0)
+                        # Save to CSV in memory (instead of Excel)
+                        csv_buffer = BytesIO()
+                        # Convert to CSV string
+                        csv_data = result_df.to_csv(index=False)
+                        # Write CSV data to buffer
+                        csv_buffer.write(csv_data.encode('utf-8'))
+                        csv_buffer.seek(0)
                         
-                        # Add to ZIP
-                        zip_file.writestr(f"{meter}.xlsx", excel_buffer.getvalue())
+                        # Add CSV to ZIP (instead of Excel)
+                        zip_file.writestr(f"{meter}.csv", csv_buffer.getvalue())
                         processed_meters += 1
                         progress_bar.progress(processed_meters / len(unique_meters))
                 
@@ -230,7 +255,7 @@ def main():
                 st.success(f"✅ Processing complete! Processed {processed_meters} meters.")
                 
                 st.download_button(
-                    label="📥 Download ZIP File",
+                    label="📥 Download ZIP File with CSV Output",
                     data=zip_buffer,
                     file_name="meter_consumption_data.zip",
                     mime="application/zip"
@@ -241,12 +266,36 @@ def main():
                     st.write("Timestamp format in output:", result_df['Timestamp'].iloc[0] if not result_df.empty else "No data")
                     st.dataframe(result_df.head(10) if not result_df.empty else "No data available")
                 
+                # Show statistics
+                with st.expander("📊 Processing Statistics"):
+                    st.write(f"Total meters processed: {processed_meters}")
+                    st.write(f"Total timestamps in master timeline: {len(master_timestamps)}")
+                    st.write(f"Date range: {master_timestamps[0].strftime('%d/%m/%Y')} to {master_timestamps[-1].strftime('%d/%m/%Y')}")
+                
             except Exception as e:
                 st.error(f"❌ Processing failed: {str(e)}")
-                st.info("Please check your files and try again.")
+                st.info("Please check your ZIP file and try again.")
     
     else:
-        st.info("📁 Please upload one or more Excel files to proceed.")
+        st.info("📁 Please upload a ZIP file containing Excel files to proceed.")
+        
+        # Instructions
+        with st.expander("📋 How to prepare your data"):
+            st.markdown("""
+            **Required ZIP file structure:**
+            - A ZIP file containing one or more Excel files (.xlsx or .xls)
+            - Excel files can be in the root or in folders within the ZIP
+            
+            **Required Excel format:**
+            - Each Excel file must have these columns: `Timestamp`, `Meter`, `Energy Reading`
+            - Timestamp format: `DD/MM/YYYY HH:MM` (e.g., `01/01/2025 00:00`)
+            - Meter: Meter identifier (text or number)
+            - Energy Reading: Numeric energy reading value
+            
+            **Output format:**
+            - Each meter will have its own CSV file in the output ZIP
+            - CSV files contain: `Timestamp`, `Meter`, `Volume Consumption`
+            """)
 
 if __name__ == "__main__":
     main()
