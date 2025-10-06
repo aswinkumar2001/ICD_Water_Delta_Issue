@@ -126,41 +126,36 @@ def calculate_meter_consumption(meter_data, master_timestamps):
         result_df['Timestamp'] = result_df['Timestamp'].dt.strftime('%d/%m/%Y %H:%M')
         return result_df
 
-def extract_and_read_excel_files(zip_file):
-    """Extract and read all Excel files from ZIP archive"""
+def read_excel_files(uploaded_files):
+    """Read all uploaded Excel files and combine data"""
     all_data = []
     required_columns = ['Timestamp', 'Meter', 'Energy Reading']
     
-    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-        # Get list of all Excel files in the ZIP
-        excel_files = [f for f in zip_ref.namelist() if f.endswith(('.xlsx', '.xls'))]
-        
-        if not excel_files:
-            st.error("No Excel files found in the ZIP archive.")
-            return None
-        
-        st.write(f"Found {len(excel_files)} Excel files in the ZIP archive")
-        
-        for excel_file in excel_files:
-            try:
-                # Read Excel file directly from ZIP
-                with zip_ref.open(excel_file) as file:
-                    df = pd.read_excel(file)
+    if not uploaded_files:
+        st.error("No files uploaded.")
+        return None
+    
+    st.write(f"Found {len(uploaded_files)} Excel files")
+    
+    for i, file in enumerate(uploaded_files):
+        try:
+            # Read Excel file
+            df = pd.read_excel(file)
+            
+            # Validate required columns
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                st.warning(f"File {file.name} missing columns: {missing_columns}. Skipping.")
+                continue
                 
-                # Validate required columns
-                missing_columns = [col for col in required_columns if col not in df.columns]
-                if missing_columns:
-                    st.warning(f"File {excel_file} missing columns: {missing_columns}. Skipping.")
-                    continue
-                    
-                all_data.append(df)
-                st.success(f"✅ Successfully read {excel_file}")
-                
-            except Exception as e:
-                st.warning(f"Could not read file {excel_file}: {str(e)}. Skipping.")
+            all_data.append(df)
+            st.success(f"✅ Successfully read {file.name}")
+            
+        except Exception as e:
+            st.warning(f"Could not read file {file.name}: {str(e)}. Skipping.")
     
     if not all_data:
-        st.error("No valid Excel data found in the ZIP archive.")
+        st.error("No valid Excel data found in the uploaded files.")
         return None
     
     # Combine all data
@@ -173,10 +168,20 @@ def main():
     # Generate master timeline
     master_timestamps = generate_master_timeline()
     
-    # File uploader for ZIP file containing Excel files
-    uploaded_zip = st.file_uploader("Upload ZIP file containing Excel files", type=['zip'], accept_multiple_files=False)
+    # File uploader for multiple Excel files
+    uploaded_files = st.file_uploader(
+        "Upload Excel files", 
+        type=['xlsx', 'xls'], 
+        accept_multiple_files=True,
+        help="You can upload up to 8 Excel files"
+    )
     
-    if uploaded_zip:
+    if uploaded_files:
+        # Show uploaded files
+        st.write(f"**Uploaded files ({len(uploaded_files)}):**")
+        for file in uploaded_files:
+            st.write(f"- {file.name}")
+        
         # Show configuration options
         with st.expander("⚙️ Advanced Settings"):
             col1, col2 = st.columns(2)
@@ -202,8 +207,8 @@ def main():
                 st.info("Processing data...")
                 progress_bar = st.progress(0)
                 
-                # Extract and read Excel files from ZIP
-                combined_data = extract_and_read_excel_files(uploaded_zip)
+                # Read all Excel files
+                combined_data = read_excel_files(uploaded_files)
                 
                 if combined_data is None:
                     return
@@ -237,7 +242,7 @@ def main():
                         
                         result_df = calculate_meter_consumption(meter_data, master_timestamps)
                         
-                        # Save to CSV in memory (instead of Excel)
+                        # Save to CSV in memory
                         csv_buffer = BytesIO()
                         # Convert to CSV string
                         csv_data = result_df.to_csv(index=False)
@@ -245,7 +250,7 @@ def main():
                         csv_buffer.write(csv_data.encode('utf-8'))
                         csv_buffer.seek(0)
                         
-                        # Add CSV to ZIP (instead of Excel)
+                        # Add CSV to ZIP
                         zip_file.writestr(f"{meter}.csv", csv_buffer.getvalue())
                         processed_meters += 1
                         progress_bar.progress(processed_meters / len(unique_meters))
@@ -254,38 +259,65 @@ def main():
                 
                 st.success(f"✅ Processing complete! Processed {processed_meters} meters.")
                 
-                st.download_button(
-                    label="📥 Download ZIP File with CSV Output",
-                    data=zip_buffer,
-                    file_name="meter_consumption_data.zip",
-                    mime="application/zip"
-                )
+                # Download button
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.download_button(
+                        label="📥 Download ZIP File with CSV Output",
+                        data=zip_buffer,
+                        file_name="meter_consumption_data.zip",
+                        mime="application/zip",
+                        use_container_width=True
+                    )
+                
+                with col2:
+                    # Also provide option to download a sample CSV
+                    if processed_meters > 0:
+                        sample_meter = unique_meters[0]
+                        sample_data = combined_data[combined_data['Meter'] == sample_meter].copy()
+                        sample_result = calculate_meter_consumption(sample_data, master_timestamps)
+                        sample_csv = sample_result.to_csv(index=False)
+                        
+                        st.download_button(
+                            label="📄 Download Sample CSV",
+                            data=sample_csv,
+                            file_name=f"sample_{sample_meter}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
                 
                 # Show sample of processed data
                 with st.expander("👀 Preview Processed Data Format"):
-                    st.write("Timestamp format in output:", result_df['Timestamp'].iloc[0] if not result_df.empty else "No data")
-                    st.dataframe(result_df.head(10) if not result_df.empty else "No data available")
+                    if processed_meters > 0:
+                        sample_meter = unique_meters[0]
+                        sample_data = combined_data[combined_data['Meter'] == sample_meter].copy()
+                        sample_result = calculate_meter_consumption(sample_data, master_timestamps)
+                        
+                        st.write(f"Sample data for meter: {sample_meter}")
+                        st.write("Timestamp format in output:", sample_result['Timestamp'].iloc[0] if not sample_result.empty else "No data")
+                        st.dataframe(sample_result.head(10) if not sample_result.empty else "No data available")
                 
                 # Show statistics
                 with st.expander("📊 Processing Statistics"):
+                    st.write(f"Total Excel files processed: {len(uploaded_files)}")
                     st.write(f"Total meters processed: {processed_meters}")
                     st.write(f"Total timestamps in master timeline: {len(master_timestamps)}")
                     st.write(f"Date range: {master_timestamps[0].strftime('%d/%m/%Y')} to {master_timestamps[-1].strftime('%d/%m/%Y')}")
+                    
+                    # File size info
+                    total_size = sum(file.size for file in uploaded_files)
+                    st.write(f"Total input file size: {total_size / 1024 / 1024:.2f} MB")
                 
             except Exception as e:
                 st.error(f"❌ Processing failed: {str(e)}")
-                st.info("Please check your ZIP file and try again.")
+                st.info("Please check your Excel files and try again.")
     
     else:
-        st.info("📁 Please upload a ZIP file containing Excel files to proceed.")
+        st.info("📁 Please upload one or more Excel files to proceed.")
         
         # Instructions
         with st.expander("📋 How to prepare your data"):
             st.markdown("""
-            **Required ZIP file structure:**
-            - A ZIP file containing one or more Excel files (.xlsx or .xls)
-            - Excel files can be in the root or in folders within the ZIP
-            
             **Required Excel format:**
             - Each Excel file must have these columns: `Timestamp`, `Meter`, `Energy Reading`
             - Timestamp format: `DD/MM/YYYY HH:MM` (e.g., `01/01/2025 00:00`)
@@ -295,6 +327,8 @@ def main():
             **Output format:**
             - Each meter will have its own CSV file in the output ZIP
             - CSV files contain: `Timestamp`, `Meter`, `Volume Consumption`
+            
+            **You can upload up to 8 Excel files at once**
             """)
 
 if __name__ == "__main__":
